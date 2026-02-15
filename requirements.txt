@@ -1,0 +1,20 @@
+torch
+torchaudio
+einops
+timm
+pillow
+transformers @ git+https://github.com/huggingface/transformers
+accelerate @ git+https://github.com/huggingface/accelerate
+diffusers @ git+https://github.com/huggingface/diffusers
+huggingface_hub
+sentencepiece
+bitsandbytes
+protobuf
+decord
+librosa
+peft
+numpy
+parler-tts @ git+https://github.com/huggingface/parler-tts.git
+soundfile
+fastapi
+uvicorn[standard]
