@@ -3,9 +3,9 @@ torchaudio
 einops
 timm
 pillow
-transformers @ git+https://github.com/huggingface/transformers
-accelerate @ git+https://github.com/huggingface/accelerate
-diffusers @ git+https://github.com/huggingface/diffusers
+transformers==4.46.1
+accelerate
+diffusers
 huggingface_hub
 sentencepiece
 bitsandbytes

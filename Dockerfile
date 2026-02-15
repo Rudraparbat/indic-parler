@@ -25,6 +25,7 @@ COPY requirements.txt .
 ENV GIT_LFS_SKIP_SMUDGE=1
 
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir transformers==4.46.1 && \
     pip install --no-cache-dir -r requirements.txt
 
 # ─────────────────────────────────────────────
