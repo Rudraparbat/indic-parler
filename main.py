@@ -11,10 +11,11 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-
+from huggingface_hub import login
 from config import settings
 from src.routers import openai_router
-
+from dotenv import load_dotenv
+load_dotenv()
 
 def setup_logger():
     """Configure loguru logger with custom formatting"""
@@ -43,12 +44,18 @@ def setup_logger():
 
 # Configure logger
 setup_logger()
-
+HF_TOKEN = os.getenv('HF_TOKEN')
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load Indic Parler TTS model on startup, clean up on shutdown"""
+    try:
+        login(token=HF_TOKEN)
+        print("✅ Hugging Face authentication successful")
+    except Exception as e:
+        print(f"❌ Hugging Face authentication failed: {e}")
+        raise
 
     # --- STARTUP ---
 
