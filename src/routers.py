@@ -9,8 +9,8 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from parler_tts import ParlerTTSStreamer
 
-from schemas import VOICE_PRESETS, OpenAISpeechRequest, CaptionedSpeechRequest
-from services.streaming_writer import StreamingAudioWriter
+from .schemas import VOICE_PRESETS, OpenAISpeechRequest, CaptionedSpeechRequest
+from .services.streaming_writer import StreamingAudioWriter
 import logging
 
 logger = logging.getLogger(__name__)
