@@ -86,7 +86,7 @@ async def stream_audio_chunks(
     device = client_request.app.state.device
     sampling_rate = client_request.app.state.sampling_rate
     frame_rate = client_request.app.state.frame_rate
-
+    audio_porcessor = client_request.app.state.process
     logger.debug(f"[{request_id}] Using device='{device}' | sampling_rate={sampling_rate} | frame_rate={frame_rate}")
 
     # --- Resolve voice description ---
@@ -168,8 +168,22 @@ async def stream_audio_chunks(
             chunk_count += 1
             total_audio_seconds += chunk_duration
             logger.debug(f"[{request_id}] Chunk #{chunk_count} received | duration={chunk_duration}s | shape={audio_chunk.shape}")
-            yield audio_chunk
-            
+            logger.info("convert float32 audio chunks to float16 ")
+            audio_int16 = (audio_chunk * 32767).astype(np.int16)
+            pcm_bytes = audio_int16.tobytes()
+
+            audio_porcessor.stdin.write(pcm_bytes)
+            audio_porcessor.stdin.flush()
+
+            mp3_data = audio_porcessor.stdout.read(8192)
+            if mp3_data :
+                logger.info(f"Yeilding mp3 data..")
+                yield mp3_data
+        
+        audio_porcessor.stdin.close()
+        remaining_mp3 = audio_porcessor.stdout.read()
+        if remaining_mp3:
+            yield remaining_mp3
             
     except Exception as e:
         logger.error(f"[{request_id}] Fatal error in stream_audio_chunks: {e}", exc_info=True)
@@ -194,7 +208,9 @@ async def stream_audio_chunks(
                 logger.debug(
                     f"[{request_id}] Generation thread joined cleanly"
                 )
-
+        audio_porcessor.terminate()
+        audio_porcessor.wait()
+        logger.info(f"[{request_id}] Streaming complete.")
 
 async def generate_full_audio(
     request: OpenAISpeechRequest,
