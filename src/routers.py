@@ -103,16 +103,13 @@ async def stream_audio_chunks(
         f"format={request.response_format}"
     )
 
-    command = (
-        f"ffmpeg -y -f s16le -ar {sampling_rate} -ac 1 -i pipe:0 "
-        f"-f mp3 -acodec libmp3lame -b:a 128k pipe:1"
-    )
-    local_audio_processor = subprocess.Popen(
-        shlex.split(command),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        bufsize=0 
+    process = await asyncio.create_subprocess_exec(
+        'ffmpeg',
+        '-y', '-f', 's16le', '-ar', str(sampling_rate), '-ac', '1', '-i', 'pipe:0',
+        '-f', 'mp3', '-acodec', 'libmp3lame', '-b:a', '128k', 'pipe:1',
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL
     )
 
     try:
@@ -185,18 +182,21 @@ async def stream_audio_chunks(
             audio_int16 = (audio_chunk * 32767).astype(np.int16)
             pcm_bytes = audio_int16.tobytes()
 
-            local_audio_processor.stdin.write(pcm_bytes)
-            local_audio_processor.stdin.flush()
-
-            mp3_data = local_audio_processor.stdout.read(4096)
-            if mp3_data :
-                logger.info(f"Yeilding mp3 data..")
-                yield mp3_data
+            process.stdin.write(pcm_bytes)
+            await process.stdin.drain()
+            try:
+                mp3_data = await asyncio.wait_for(process.stdout.read(4096), timeout=0.5)
+                if mp3_data:
+                    yield mp3_data
+            except asyncio.TimeoutError:
+                continue
         
-        local_audio_processor.stdin.close()
-        remaining_mp3 = local_audio_processor.stdout.read()
-        if remaining_mp3:
-            yield remaining_mp3
+        if process.stdin:
+            process.stdin.close()
+            await process.stdin.wait_closed()
+        final_mp3 = await process.stdout.read()
+        if final_mp3:
+            yield final_mp3
             
     except Exception as e:
         logger.error(f"[{request_id}] Fatal error in stream_audio_chunks: {e}", exc_info=True)
@@ -221,9 +221,10 @@ async def stream_audio_chunks(
                 logger.debug(
                     f"[{request_id}] Generation thread joined cleanly"
                 )
-        if local_audio_processor:
-            local_audio_processor.terminate()
-            local_audio_processor.wait()
+        if process.returncode is None:
+            process.terminate()
+            await process.wait()
+        logger.info(f"[{request_id}] FFmpeg cleaned up.")
 
 async def generate_full_audio(
     request: OpenAISpeechRequest,
