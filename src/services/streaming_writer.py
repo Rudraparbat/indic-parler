@@ -98,7 +98,7 @@ class StreamingAudioWriter:
         else:
             frame = av.AudioFrame.from_ndarray(
                 audio_data.reshape(1, -1),
-                format="s16",
+                format="fltp",
                 layout="mono" if self.channels == 1 else "stereo",
             )
             frame.sample_rate = self.sample_rate

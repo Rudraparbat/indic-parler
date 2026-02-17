@@ -1,116 +1,170 @@
-"""Audio conversion service with proper streaming support"""
-
-import struct
-from io import BytesIO
-from typing import Optional
-
-import av
-import numpy as np
-import soundfile as sf
+from threading import Thread
+from typing import AsyncGenerator, Union
+from fastapi import Request
+from parler_tts import ParlerTTSStreamer
+from services.streaming_writer import StreamingAudioWriter
+from ..schemas import OpenAISpeechRequest, CaptionedSpeechRequest
 from loguru import logger
-from pydub import AudioSegment
+from services.utils import  resolve_voice
 
 
-class StreamingAudioWriter:
-    """Handles streaming audio format conversions"""
+def _run_generation_thread(model, generation_kwargs: dict) -> None:
+    """Target function for the generation thread"""
+    logger.debug("Generation thread started")
+    try:
+        model.generate(**generation_kwargs)
+        logger.debug("Generation thread completed successfully")
+    except Exception as e:
+        logger.error(f"Generation thread failed: {e}")
+        raise
 
-    def __init__(self, format: str, sample_rate: int, channels: int = 1):
-        self.format = format.lower()
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self.bytes_written = 0
-        self.pts = 0
 
-        codec_map = {
-            "wav": "pcm_s16le",
-            "mp3": "mp3",
-            "opus": "libopus",
-            "flac": "flac",
-            "aac": "aac",
-        }
-        # Format-specific setup
-        if self.format in ["wav", "flac", "mp3", "pcm", "aac", "opus"]:
-            if self.format != "pcm":
-                self.output_buffer = BytesIO()
-                container_options = {}
-                # Try disabling Xing VBR header for MP3 to fix iOS timeline reading issues
-                if self.format == 'mp3':
-                    # Disable Xing VBR header
-                    container_options = {'write_xing': '0'}
-                    logger.debug("Disabling Xing VBR header for MP3 encoding.")
+async def stream_audio_chunks(
+    request: Union[OpenAISpeechRequest, CaptionedSpeechRequest],
+    client_request: Request,
+    play_steps_in_s: float = 0.5,
+) -> AsyncGenerator[bytes, None]:
+    """
+    Stream audio chunks using ParlerTTSStreamer.
+    Yields audio at frame level as it's decoded in a background thread.
+    """
 
-                self.container = av.open(
-                    self.output_buffer,
-                    mode="w",
-                    format=self.format if self.format != "aac" else "adts",
-                    options=container_options # Pass options here
-                )
-                self.stream = self.container.add_stream(
-                    codec_map[self.format],
-                    rate=self.sample_rate,
-                    layout="mono" if self.channels == 1 else "stereo",
-                )
-                # Set bit_rate only for codecs where it's applicable and useful
-                if self.format in ['mp3', 'aac', 'opus']:
-                    self.stream.bit_rate = 128000
-        else:
-            raise ValueError(f"Unsupported format: {self.format}") # Use self.format here
+    request_id = id(request)  # simple unique id per request for log tracing
+    logger.info(f"[{request_id}] New streaming request | voice='{request.voice}' | format='{request.response_format}' | input_length={len(request.input)} chars")
+    
+    # dropping flac type streaming
+    if request.stream and request.response_format == "flac":
+        logger.warning(
+            f"[{request_id}] FLAC requested with streaming=True — "
+            f"FLAC buffers heavily and is not suitable for streaming. "
+            f"Rejecting request."
+        )
+        raise ValueError(
+            "FLAC format is not supported for streaming. "
+            "Use wav, mp3, opus, or pcm for streaming. "
+            "Set stream=False to get a complete FLAC file."
+        )
+    
+    # --- Pull everything from app.state ---
+    model = client_request.app.state.model
+    tokenizer = client_request.app.state.tokenizer
+    description_tokenizer = client_request.app.state.description_tokenizer
+    device = client_request.app.state.device
+    sampling_rate = client_request.app.state.sampling_rate
+    frame_rate = client_request.app.state.frame_rate
+    logger.debug(f"[{request_id}] Using device='{device}' | sampling_rate={sampling_rate} | frame_rate={frame_rate}")
 
-    def close(self):
-        if hasattr(self, "container"):
-            self.container.close()
+    # --- Resolve voice description ---
+    voice_description = resolve_voice(request.voice)
+    logger.info(f"[{request_id}] Voice resolved | description='{voice_description[:80]}{'...' if len(voice_description) > 80 else ''}'")
 
-        if hasattr(self, "output_buffer"):
-            self.output_buffer.close()
+    # --- Calculate play_steps ---
+    play_steps = int(frame_rate * play_steps_in_s)
+    logger.debug(f"[{request_id}] Chunk config | play_steps_in_s={play_steps_in_s}s | play_steps={play_steps} frames")
 
-    def write_chunk(
-        self, audio_data: Optional[np.ndarray] = None, finalize: bool = False
-    ) -> bytes:
-        """Write a chunk of audio data and return bytes in the target format.
+    logger.debug(
+        f"[{request_id}] StreamingAudioWriter initialized | "
+        f"format={request.response_format}"
+    )
+    logger.info("Initialized audio converter..")
+    writer= StreamingAudioWriter(str(request.response_format) , sampling_rate)
+    logger.info(f"Audio writer init successfully")
+    try:
+        # --- Tokenize description ---
+        logger.debug(f"[{request_id}] Tokenizing voice description...")
+        inputs = description_tokenizer(
+            voice_description,
+            return_tensors="pt"
+        ).to(device)
+        logger.debug(f"[{request_id}] Description tokenized | input_ids shape={inputs.input_ids.shape}")
 
-        Args:
-            audio_data: Audio data to write, or None if finalizing
-            finalize: Whether this is the final write to close the stream
-        """
+        # --- Tokenize input text ---
+        logger.debug(f"[{request_id}] Tokenizing input text...")
+        prompt = tokenizer(
+            request.input,
+            return_tensors="pt"
+        ).to(device)
+        logger.debug(f"[{request_id}] Input text tokenized | prompt_ids shape={prompt.input_ids.shape}")
 
-        if finalize:
-            if self.format != "pcm":
-                # Flush stream encoder
-                packets = self.stream.encode(None)
-                for packet in packets:
-                    self.container.mux(packet)
+        # --- Set up native Parler streamer ---
+        logger.debug(f"[{request_id}] Initializing ParlerTTSStreamer...")
+        streamer = ParlerTTSStreamer(
+            model,
+            device=device,
+            play_steps=play_steps
+        )
+        logger.debug(f"[{request_id}] ParlerTTSStreamer ready")
 
-                # Closing the container handles writing the trailer and finalizing the file.
-                # No explicit flush method is available or needed here.
-                logger.debug("Muxed final packets.")
+        # --- Build generation kwargs ---
+        generation_kwargs = dict(
+            input_ids=inputs.input_ids,
+            prompt_input_ids=prompt.input_ids,
+            attention_mask=inputs.attention_mask,
+            prompt_attention_mask=prompt.attention_mask,
+            streamer=streamer,
+            do_sample=True,
+            temperature=1.0,
+            min_new_tokens=10,
+        )
+        logger.debug(f"[{request_id}] Generation kwargs built | do_sample=True | temperature=1.0 | min_new_tokens=10")
 
-                # Get the final bytes from the buffer *before* closing it
-                data = self.output_buffer.getvalue()
-                self.close() # Close container and buffer
-                return data
+        # --- Kick off generation thread ---
+        logger.info(f"[{request_id}] Starting generation thread...")
+        thread = Thread(
+            target=_run_generation_thread,
+            args=(model, generation_kwargs),
+            daemon=True
+        )
+        thread.start()
+        logger.info(f"[{request_id}] Generation thread started | thread_id={thread.ident}")
 
-        if audio_data is None or len(audio_data) == 0:
-            return b""
+        # --- Stream chunks ---
+        chunk_count = 0
+        total_audio_seconds = 0.0
 
-        if self.format == "pcm":
-            # Write raw bytes
-            return audio_data.tobytes()
-        else:
-            frame = av.AudioFrame.from_ndarray(
-                audio_data.reshape(1, -1),
-                format="fltp",
-                layout="mono" if self.channels == 1 else "stereo",
+        logger.info(f"[{request_id}] Beginning to stream chunks to client...")
+
+        for audio_chunk in streamer:
+            if audio_chunk.shape[0] == 0:
+                logger.info(f"[{request_id}] Received empty chunk — generation complete")
+                break
+
+            chunk_duration = round(audio_chunk.shape[0] / sampling_rate, 4)
+            chunk_count += 1
+            total_audio_seconds += chunk_duration
+            logger.debug(f"[{request_id}] Chunk #{chunk_count} received | duration={chunk_duration}s | shape={audio_chunk.shape}")
+            logger.info(f"chunk recived {audio_chunk}")
+            chunk_bytes = writer.write_chunk(audio_chunk)
+            logger.info(f"Converted chunks {chunk_bytes}")
+            yield chunk_bytes
+        
+    except Exception as e:
+        logger.error(f"[{request_id}] Fatal error in stream_audio_chunks: {e}", exc_info=True)
+        raise
+
+    finally:
+        # ─────────────────────────────────────────
+        # cleanup — thread 
+        # ─────────────────────────────────────────
+        if thread and thread.is_alive():
+            logger.warning(
+                f"[{request_id}] Generation thread still alive — "
+                f"joining with 5s timeout..."
             )
-            frame.sample_rate = self.sample_rate
+            thread.join(timeout=5.0)
+            if thread.is_alive():
+                logger.error(
+                    f"[{request_id}] Generation thread did not terminate "
+                    f"within timeout — possible resource leak!"
+                )
+            else:
+                logger.debug(
+                    f"[{request_id}] Generation thread joined cleanly"
+                )
+        if 'writer' in locals():  
+            final_bytes = writer.write_chunk(finalize=True)  # Write trailer
+            logger.debug(f"[{request_id}] Writer finalized: {len(final_bytes)} bytes")
+            yield final_bytes  # Send final playable chunk!
+            writer.close()
+        
 
-            frame.pts = self.pts
-            self.pts += frame.samples
-
-            packets = self.stream.encode(frame)
-            for packet in packets:
-                self.container.mux(packet)
-
-            data = self.output_buffer.getvalue()
-            self.output_buffer.seek(0)
-            self.output_buffer.truncate(0)
-            return data
