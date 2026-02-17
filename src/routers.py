@@ -12,9 +12,7 @@ from fastapi.responses import StreamingResponse
 from parler_tts import ParlerTTSStreamer
 
 from .schemas import VOICE_PRESETS, OpenAISpeechRequest, CaptionedSpeechRequest
-import logging
-
-logger = logging.getLogger(__name__)
+from loguru import logger
 
 
 
@@ -23,6 +21,15 @@ openai_router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
+
+import struct
+
+def get_wav_header(sample_rate):
+    # This creates a 44-byte header that tells the player: 
+    # "This is a 16-bit Mono PCM stream at X speed"
+    return struct.pack('<4sI4s4sIHHIIHH4sI', 
+        b'RIFF', 0xFFFFFFFF, b'WAVE', b'fmt ', 16, 1, 1, 
+        sample_rate, sample_rate * 2, 2, 16, b'data', 0xFFFFFFFF)
 
 
 def resolve_voice(voice: str) -> str:
@@ -103,15 +110,6 @@ async def stream_audio_chunks(
         f"format={request.response_format}"
     )
 
-    process = await asyncio.create_subprocess_exec(
-        'ffmpeg',
-        '-y', '-f', 's16le', '-ar', str(sampling_rate), '-ac', '1', '-i', 'pipe:0',
-        '-f', 'mp3', '-acodec', 'libmp3lame', '-b:a', '128k', 'pipe:1',
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL
-    )
-
     try:
         # --- Tokenize description ---
         logger.debug(f"[{request_id}] Tokenizing voice description...")
@@ -167,9 +165,8 @@ async def stream_audio_chunks(
 
         logger.info(f"[{request_id}] Beginning to stream chunks to client...")
 
+        yield get_wav_header(sampling_rate)
         for audio_chunk in streamer:
-
-            # Empty chunk = generation done
             if audio_chunk.shape[0] == 0:
                 logger.info(f"[{request_id}] Received empty chunk — generation complete")
                 break
@@ -179,25 +176,11 @@ async def stream_audio_chunks(
             total_audio_seconds += chunk_duration
             logger.debug(f"[{request_id}] Chunk #{chunk_count} received | duration={chunk_duration}s | shape={audio_chunk.shape}")
             logger.info("convert float32 audio chunks to float16 ")
-            audio_int16 = (audio_chunk * 32767).astype(np.int16)
-            pcm_bytes = audio_int16.tobytes()
-
-            process.stdin.write(pcm_bytes)
-            await process.stdin.drain()
-            try:
-                mp3_data = await asyncio.wait_for(process.stdout.read(4096), timeout=0.5)
-                if mp3_data:
-                    yield mp3_data
-            except asyncio.TimeoutError:
-                continue
+            clean_chunk = np.clip(audio_chunk, -0.99, 0.99)
+            audio_int16 = (clean_chunk * 32767).astype(np.int16)
+            chunk_bytes = audio_int16.tobytes()
+            yield chunk_bytes
         
-        if process.stdin:
-            process.stdin.close()
-            await process.stdin.wait_closed()
-        final_mp3 = await process.stdout.read()
-        if final_mp3:
-            yield final_mp3
-            
     except Exception as e:
         logger.error(f"[{request_id}] Fatal error in stream_audio_chunks: {e}", exc_info=True)
         raise
@@ -221,10 +204,6 @@ async def stream_audio_chunks(
                 logger.debug(
                     f"[{request_id}] Generation thread joined cleanly"
                 )
-        if process.returncode is None:
-            process.terminate()
-            await process.wait()
-        logger.info(f"[{request_id}] FFmpeg cleaned up.")
 
 async def generate_full_audio(
     request: OpenAISpeechRequest,
