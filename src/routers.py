@@ -10,7 +10,7 @@ import shlex
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from parler_tts import ParlerTTSStreamer
-
+from services.audio_streaming import StreamingAudioWriter
 from .schemas import VOICE_PRESETS, OpenAISpeechRequest, CaptionedSpeechRequest
 from loguru import logger
 
@@ -113,7 +113,9 @@ async def stream_audio_chunks(
         f"[{request_id}] StreamingAudioWriter initialized | "
         f"format={request.response_format}"
     )
-
+    logger.info("Initialized audio converter..")
+    writer= StreamingAudioWriter(str(request.response_format) , sampling_rate)
+    logger.info(f"Audio writer init successfully")
     try:
         # --- Tokenize description ---
         logger.debug(f"[{request_id}] Tokenizing voice description...")
@@ -169,7 +171,6 @@ async def stream_audio_chunks(
 
         logger.info(f"[{request_id}] Beginning to stream chunks to client...")
 
-        yield get_wav_header(sampling_rate)
         for audio_chunk in streamer:
             if audio_chunk.shape[0] == 0:
                 logger.info(f"[{request_id}] Received empty chunk — generation complete")
@@ -179,19 +180,10 @@ async def stream_audio_chunks(
             chunk_count += 1
             total_audio_seconds += chunk_duration
             logger.debug(f"[{request_id}] Chunk #{chunk_count} received | duration={chunk_duration}s | shape={audio_chunk.shape}")
-            audio_np  = audio_chunk.squeeze()
-            if request.response_format == "pcm":
-                logger.debug(f"[{request_id}] Yielding PCM float32 | {len(audio_np)} samples")
-                yield audio_np.astype(np.float32).tobytes()
-            elif request.response_format == "wav":
-                audio_int16 = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16)
-                logger.debug(f"[{request_id}] Yielding WAV int16 | max={audio_int16.max()} min={audio_int16.min()}")
-                yield audio_int16.tobytes()
-                
-            else:  # mp3, opus - convert to int16 first
-                audio_int16 = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16)
-                yield audio_int16.tobytes()
-                
+            chunk_bytes = writer.write_chunk(audio_chunk)
+            logger.info(f"Converted chunks {chunk_bytes}")
+            yield chunk_bytes
+        
     except Exception as e:
         logger.error(f"[{request_id}] Fatal error in stream_audio_chunks: {e}", exc_info=True)
         raise
@@ -215,6 +207,12 @@ async def stream_audio_chunks(
                 logger.debug(
                     f"[{request_id}] Generation thread joined cleanly"
                 )
+        if 'writer' in locals():  
+            final_bytes = writer.write_chunk(finalize=True)  # Write trailer
+            logger.debug(f"[{request_id}] Writer finalized: {len(final_bytes)} bytes")
+            yield final_bytes  # Send final playable chunk!
+            writer.close()
+        
 
 async def generate_full_audio(
     request: OpenAISpeechRequest,
