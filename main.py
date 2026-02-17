@@ -106,18 +106,6 @@ async def lifespan(app: FastAPI):
         app.state.sampling_rate = app.state.model.audio_encoder.config.sampling_rate
         app.state.frame_rate = app.state.model.audio_encoder.config.frame_rate
         
-        logger.info("Initiating ffmpeg for audio process..")
-        command = (
-            f"ffmpeg -y -f s16le -ar {app.state.sampling_rate} -ac 1 -i pipe:0 "
-            f"-f mp3 -acodec libmp3lame -b:a 128k pipe:1"
-        )
-        app.state.process = subprocess.Popen(
-            shlex.split(command),
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL # Keeps your logs clean
-        )
-        logger.info("FFMPEG Initiating done")
     except Exception as e:
         logger.error(f"Failed to load Indic Parler TTS model: {e}")
         raise
