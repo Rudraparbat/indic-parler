@@ -179,11 +179,19 @@ async def stream_audio_chunks(
             chunk_count += 1
             total_audio_seconds += chunk_duration
             logger.debug(f"[{request_id}] Chunk #{chunk_count} received | duration={chunk_duration}s | shape={audio_chunk.shape}")
-            logger.info("convert float32 audio chunks to float16 ")
-            audio_int16 = (np.clip(audio_chunk.astype(np.float32), -1.0, 1.0) * 32767).astype(np.int16)
-            logger.info(f"AUdio coded to {audio_int16}")
-            yield audio_int16.tobytes()
-        
+            audio_np = audio_chunk.cpu().numpy().squeeze()
+            if request.response_format == "pcm":
+                logger.debug(f"[{request_id}] Yielding PCM float32 | {len(audio_np)} samples")
+                yield audio_np.astype(np.float32).tobytes()
+            elif request.response_format == "wav":
+                audio_int16 = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16)
+                logger.debug(f"[{request_id}] Yielding WAV int16 | max={audio_int16.max()} min={audio_int16.min()}")
+                yield audio_int16.tobytes()
+                
+            else:  # mp3, opus - convert to int16 first
+                audio_int16 = (np.clip(audio_np, -1.0, 1.0) * 32767).astype(np.int16)
+                yield audio_int16.tobytes()
+                
     except Exception as e:
         logger.error(f"[{request_id}] Fatal error in stream_audio_chunks: {e}", exc_info=True)
         raise
@@ -326,18 +334,20 @@ async def create_speech(
         # Asks For Streaming Response
         if request.stream:
             logger.info(f"[{request_id}] Streaming mode → StreamingResponse")
-            generaor =  stream_audio_chunks(
+            generator  =  stream_audio_chunks(
                     request=request,
                     client_request=client_request,
                 )
             logger.info(f"[{request_id}] Stream finished cleanly")
+            sampling_rate = client_request.app.state.sampling_rate
             return StreamingResponse(
-                generaor,
+                generator ,
                 media_type=content_type,
                 headers={
                     "Content-Disposition": f"attachment; filename=speech.{request.response_format}",
                     "X-Request-ID": str(request_id),
                     "Accept-Ranges": "bytes",
+                    "X-Sample-Rate": str(sampling_rate),  # Essential for clients (PCM/float32)
                 }
             )
         else :
