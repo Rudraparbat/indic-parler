@@ -59,7 +59,7 @@ async def create_speech(
         # Asks For Streaming Response
         if request.stream:
             logger.info(f"[{request_id}] Streaming mode → StreamingResponse")
-            generator  =  await stream_audio_chunks(
+            generator  =  stream_audio_chunks(
                     request=request,
                     client_request=client_request,
                 )
