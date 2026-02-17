@@ -6,8 +6,8 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from .schemas import OpenAISpeechRequest
 from loguru import logger
-from services.full_audio import generate_full_audio
-from services.audio_streaming import stream_audio_chunks
+from src.services.full_audio import generate_full_audio
+from src.services.audio_streaming import stream_audio_chunks
 
 openai_router = APIRouter(
     tags=["OpenAI Compatible TTS"],
