@@ -24,12 +24,16 @@ openai_router = APIRouter(
 
 import struct
 
-def get_wav_header(sample_rate):
-    # This creates a 44-byte header that tells the player: 
-    # "This is a 16-bit Mono PCM stream at X speed"
-    return struct.pack('<4sI4s4sIHHIIHH4sI', 
-        b'RIFF', 0xFFFFFFFF, b'WAVE', b'fmt ', 16, 1, 1, 
-        sample_rate, sample_rate * 2, 2, 16, b'data', 0xFFFFFFFF)
+def get_wav_header(sample_rate=44100):
+    """
+    Creates a 44-byte WAV header for 16-bit Mono PCM.
+    """
+    byte_rate = sample_rate * 2 
+    header = struct.pack('<4sI4s4sIHHIIHH4sI',
+        b'RIFF', 0xFFFFFFFF, b'WAVE', b'fmt ', 16, 1, 1,
+        sample_rate, byte_rate, 2, 16, b'data', 0xFFFFFFFF
+    )
+    return header
 
 
 def resolve_voice(voice: str) -> str:
@@ -176,10 +180,9 @@ async def stream_audio_chunks(
             total_audio_seconds += chunk_duration
             logger.debug(f"[{request_id}] Chunk #{chunk_count} received | duration={chunk_duration}s | shape={audio_chunk.shape}")
             logger.info("convert float32 audio chunks to float16 ")
-            clean_chunk = np.clip(audio_chunk, -0.99, 0.99)
-            audio_int16 = (clean_chunk * 32767).astype(np.int16)
-            chunk_bytes = audio_int16.tobytes()
-            yield chunk_bytes
+            audio_int16 = (np.clip(audio_chunk.astype(np.float32), -1.0, 1.0) * 32767).astype(np.int16)
+            logger.info(f"AUdio coded to {audio_int16}")
+            yield audio_int16.tobytes()
         
     except Exception as e:
         logger.error(f"[{request_id}] Fatal error in stream_audio_chunks: {e}", exc_info=True)
