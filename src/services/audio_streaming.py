@@ -2,7 +2,7 @@ from threading import Thread
 from typing import AsyncGenerator, Union
 from fastapi import Request
 from parler_tts import ParlerTTSStreamer
-from services.streaming_writer import StreamingAudioWriter
+from src.services.streaming_writer import StreamingAudioWriter
 from ..schemas import OpenAISpeechRequest, CaptionedSpeechRequest
 from loguru import logger
 from src.services.utils import  resolve_voice
