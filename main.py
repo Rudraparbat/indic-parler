@@ -88,7 +88,7 @@ async def lifespan(app: FastAPI):
             model_name,
             torch_dtype=torch.float16 if app.state.device == "cuda" else torch.float32,
             token=HF_TOKEN,
-            attn_implementation="sdpa",  
+            attn_implementation="eager",  
         ).to(app.state.device)
 
 
