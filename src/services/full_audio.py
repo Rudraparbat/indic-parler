@@ -2,7 +2,7 @@ import torch
 from src.schemas import  OpenAISpeechRequest
 from loguru import logger
 from fastapi import  Request
-from services.utils import apply_speed , resolve_voice
+from src.services.utils import apply_speed , resolve_voice
 
 
 

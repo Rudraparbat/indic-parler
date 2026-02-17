@@ -5,7 +5,7 @@ from parler_tts import ParlerTTSStreamer
 from services.streaming_writer import StreamingAudioWriter
 from ..schemas import OpenAISpeechRequest, CaptionedSpeechRequest
 from loguru import logger
-from services.utils import  resolve_voice
+from src.services.utils import  resolve_voice
 
 
 def _run_generation_thread(model, generation_kwargs: dict) -> None:
