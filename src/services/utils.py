@@ -1,5 +1,5 @@
 import numpy as np
-from .schemas import VOICE_PRESETS
+from ..schemas import VOICE_PRESETS
 from loguru import logger
 import librosa
 
