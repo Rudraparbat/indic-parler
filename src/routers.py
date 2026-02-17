@@ -10,7 +10,6 @@ from fastapi.responses import StreamingResponse
 from parler_tts import ParlerTTSStreamer
 
 from .schemas import VOICE_PRESETS, OpenAISpeechRequest, CaptionedSpeechRequest
-from .services.streaming_writer import StreamingAudioWriter
 import logging
 
 logger = logging.getLogger(__name__)
@@ -98,14 +97,6 @@ async def stream_audio_chunks(
     play_steps = int(frame_rate * play_steps_in_s)
     logger.debug(f"[{request_id}] Chunk config | play_steps_in_s={play_steps_in_s}s | play_steps={play_steps} frames")
 
-    # ─────────────────────────────────────────
-    # Initialize writer + thread placeholder
-    # ─────────────────────────────────────────
-    writer = StreamingAudioWriter(
-        format=request.response_format,
-        sample_rate=sampling_rate,
-        channels=1
-    )
     logger.debug(
         f"[{request_id}] StreamingAudioWriter initialized | "
         f"format={request.response_format}"
@@ -177,83 +168,16 @@ async def stream_audio_chunks(
             chunk_count += 1
             total_audio_seconds += chunk_duration
             logger.debug(f"[{request_id}] Chunk #{chunk_count} received | duration={chunk_duration}s | shape={audio_chunk.shape}")
-
-            # --- Check client disconnect ---
-            is_disconnected = client_request.is_disconnected
-            if callable(is_disconnected):
-                is_disconnected = await is_disconnected()
-            if is_disconnected:
-                logger.warning(f"[{request_id}] Client disconnected after {chunk_count} chunks ({round(total_audio_seconds, 2)}s of audio) — stopping generation")
-                thread.join(timeout=2.0)
-                logger.debug(f"[{request_id}] Generation thread joined after disconnect")
-                break
-
-            # --- Apply speed if needed ---
-            if hasattr(request, "speed") and request.speed != 1.0:
-                logger.debug(f"[{request_id}] Chunk #{chunk_count} — applying speed={request.speed}x")
-                audio_chunk = apply_speed(audio_chunk, request.speed)
-
-            # --- Encode to requested format ---
-            audio_int16 = (audio_chunk * 32767).astype(np.int16)
-            logger.debug(
-                f"[{request_id}] Chunk #{chunk_count} — "
-                f"converted to int16 | shape={audio_int16.shape}"
-            )
-            encoded_bytes = writer.write_chunk(audio_data=audio_int16)
-
-            if encoded_bytes:
-                logger.debug(
-                    f"[{request_id}] Chunk #{chunk_count} encoded | "
-                    f"size={len(encoded_bytes)} bytes — yielding"
-                )
-                yield encoded_bytes
+            yield audio_chunk
             
-            else:
-                # MP3/Opus buffer 1-2 chunks before emitting
-                logger.debug(
-                    f"[{request_id}] Chunk #{chunk_count} — "
-                    f"encoder buffered internally, no bytes yet"
-                )
             
-        # ─────────────────────────────────────────
-        # Finalize — MP3 and Opus only
-        # WAV and PCM have nothing to flush
-        # ─────────────────────────────────────────
-        if request.response_format in ["mp3", "opus"]:
-            logger.info(
-                f"[{request_id}] Flushing final "
-                f"{request.response_format} frames..."
-            )
-            final_bytes = writer.write_chunk(finalize=True)
-            if final_bytes:
-                logger.debug(
-                    f"[{request_id}] Final flush | "
-                    f"size={len(final_bytes)} bytes — yielding"
-                )
-                yield final_bytes
-            else:
-                logger.debug(
-                    f"[{request_id}] Final flush — "
-                    f"no remaining bytes"
-                )
-        else:
-            logger.debug(
-                f"[{request_id}] {request.response_format.upper()} — "
-                f"no finalize needed"
-            )
-        
-        # --- Wait for thread cleanup ---
-        logger.debug(f"[{request_id}] Waiting for generation thread to finish...")
-        thread.join()
-        logger.info(f"[{request_id}] Stream complete | total_chunks={chunk_count} | total_audio={round(total_audio_seconds, 2)}s | thread joined cleanly")
-
     except Exception as e:
         logger.error(f"[{request_id}] Fatal error in stream_audio_chunks: {e}", exc_info=True)
         raise
 
     finally:
         # ─────────────────────────────────────────
-        # cleanup — thread + writer
+        # cleanup — thread 
         # ─────────────────────────────────────────
         if thread and thread.is_alive():
             logger.warning(
@@ -270,11 +194,6 @@ async def stream_audio_chunks(
                 logger.debug(
                     f"[{request_id}] Generation thread joined cleanly"
                 )
-
-        if hasattr(writer, "output_buffer") and not writer.output_buffer.closed:
-            logger.debug(f"[{request_id}] Closing writer in finally block")
-            writer.close()
-        logger.info(f"[{request_id}] Cleanup complete for request [{request_id}]")
 
 
 async def generate_full_audio(
@@ -347,33 +266,9 @@ async def generate_full_audio(
         logger.debug(f"[{request_id}] Applying speed={request.speed}x")
         audio = apply_speed(audio, request.speed)
 
-    # --- Convert float32 → int16 ---
-    audio_int16 = (audio * 32767).astype(np.int16)
-    logger.debug(f"[{request_id}] Converted to int16 | shape={audio_int16.shape}")
-
-    # --- Encode to requested format ---
-    logger.info(f"[{request_id}] Encoding to '{request.response_format}'...")
-    writer = StreamingAudioWriter(
-        format=request.response_format,
-        sample_rate=sampling_rate,
-        channels=1
-    )
-
-    try:
-        audio_bytes = writer.write_chunk(audio_data=audio_int16)
-        final_bytes = writer.write_chunk(finalize=True)
-        full_audio = (audio_bytes or b"") + (final_bytes or b"")
-        logger.info(
-            f"[{request_id}] Encoding complete | "
-            f"total_size={len(full_audio)} bytes"
-        )
-        return full_audio
-    finally:
-        if hasattr(writer, "output_buffer") and not writer.output_buffer.closed:
-            writer.close()
-            logger.debug(f"[{request_id}] Writer closed")
-
-
+    return audio
+ 
+    
 
 @openai_router.post("/audio/speech")
 async def create_speech(
@@ -419,27 +314,18 @@ async def create_speech(
         # Asks For Streaming Response
         if request.stream:
             logger.info(f"[{request_id}] Streaming mode → StreamingResponse")
-            async def audio_stream_generator():
-                try:
-                    async for chunk in stream_audio_chunks(
-                        request=request,
-                        client_request=client_request,
-                    ):
-                        yield chunk
-                    logger.info(f"[{request_id}] Stream finished cleanly")
-                except ValueError as e:
-                    logger.error(f"[{request_id}] Stream ValueError: {e}")
-                    raise HTTPException(status_code=400, detail=str(e))
-                except Exception as e:
-                    logger.error(f"[{request_id}] Stream error: {e}", exc_info=True)
-                    raise
+            generaor =  stream_audio_chunks(
+                    request=request,
+                    client_request=client_request,
+                )
+            logger.info(f"[{request_id}] Stream finished cleanly")
             return StreamingResponse(
-                audio_stream_generator(),
+                generaor,
                 media_type=content_type,
                 headers={
                     "Content-Disposition": f"attachment; filename=speech.{request.response_format}",
                     "X-Request-ID": str(request_id),
-                    "Transfer-Encoding": "chunked",
+                    "Accept-Ranges": "bytes",
                 }
             )
         else :

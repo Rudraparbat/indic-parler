@@ -76,15 +76,30 @@ async def lifespan(app: FastAPI):
         model_name = "ai4bharat/indic-parler-tts"
 
         # 2. Load tokenizers & model directly into app.state
-        app.state.description_tokenizer = AutoTokenizer.from_pretrained(model_name)
-        app.state.tokenizer = AutoTokenizer.from_pretrained(model_name)
-
+        app.state.description_tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        token=HF_TOKEN
+        )
+        app.state.tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        token=HF_TOKEN
+        )
         app.state.model = ParlerTTSForConditionalGeneration.from_pretrained(
             model_name,
             torch_dtype=torch.float16 if app.state.device == "cuda" else torch.float32,
+            token=HF_TOKEN,
+            attn_implementation="sdpa",  
         ).to(app.state.device)
 
+
         app.state.model.eval()
+        if app.state.device == "cuda":
+            logger.info("Compiling model with torch.compile for additional speedup...")
+            app.state.model = torch.compile(
+                app.state.model,
+                mode="reduce-overhead"  
+            )
+            logger.info("Model compilation complete")
         app.state.sampling_rate = app.state.model.audio_encoder.config.sampling_rate
         app.state.frame_rate = app.state.model.audio_encoder.config.frame_rate
 
