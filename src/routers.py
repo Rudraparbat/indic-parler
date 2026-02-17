@@ -179,7 +179,7 @@ async def stream_audio_chunks(
             chunk_count += 1
             total_audio_seconds += chunk_duration
             logger.debug(f"[{request_id}] Chunk #{chunk_count} received | duration={chunk_duration}s | shape={audio_chunk.shape}")
-            audio_np = audio_chunk.cpu().numpy().squeeze()
+            audio_np  = audio_chunk.squeeze()
             if request.response_format == "pcm":
                 logger.debug(f"[{request_id}] Yielding PCM float32 | {len(audio_np)} samples")
                 yield audio_np.astype(np.float32).tobytes()
